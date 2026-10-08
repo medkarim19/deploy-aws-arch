@@ -1,0 +1,6 @@
+[servers]
+34.235.128.113
+[servers:vars]
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_private_key_file=deployer_key.pem
+ansible_user=ubuntu

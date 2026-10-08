@@ -1,0 +1,37 @@
+---
+- name: Basic Web Server Setup
+  hosts: servers
+  gather_facts: False
+  become: yes
+  tasks:
+    - name: Ensure SSH connection is available
+      ansible.builtin.wait_for:
+        port: 22
+        delay: 10
+        timeout: 100
+        search_regex: OpenSSH
+        host: '{{ ansible_host | default(inventory_hostname) }}'
+      become: no  # Ensure that sudo is not used for this delegated task
+
+    - name: Update apt cache manually
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Start Nginx service
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Create index.html with "Hello, World!"
+      copy:
+        dest: /var/www/html/index.html
+        content: "Hello from ansible"
+        mode: '0644'
+

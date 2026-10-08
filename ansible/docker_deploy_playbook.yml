@@ -1,0 +1,170 @@
+---
+- name: Basic Web Server Setup
+  hosts: servers
+  gather_facts: False
+  become: yes
+
+  tasks:
+    - name: Ensure SSH connection is available
+      ansible.builtin.wait_for:
+        port: 22
+        delay: 10
+        timeout: 100
+        search_regex: OpenSSH
+        host: '{{ ansible_host | default(inventory_hostname) }}'
+      vars:
+        ansible_connection: local
+      become: no
+
+- name: Install Docker and Docker-compose
+  hosts: servers
+  become: yes
+  vars_files:
+    - ansible-vars.yaml
+
+  tasks:
+    - name: Update apt cache manually
+      apt:
+        update_cache: yes
+        cache_valid_time: "{{ cache_time }}"
+
+    - name: Install Docker
+      apt:
+        name: "{{ docker_package_name }}"
+        update_cache: yes
+        state: present
+
+    - name: Install Docker-compose
+      apt:
+        name: docker-compose
+        state: present
+
+    - name: Ensure Docker service is started
+      systemd:
+        name: "{{ docker_service_name }}"
+        state: started
+        enabled: yes
+
+    - name: Check Docker version
+      command: docker --version
+      register: docker_version_output
+
+    - name: Display Docker version
+      debug:
+        msg: "Docker version: {{ docker_version_output.stdout }}"
+
+    - name: Check Docker Compose version
+      command: docker-compose --version
+      register: docker_compose_version_output
+
+    - name: Display Docker Compose version
+      debug:
+        msg: "Docker Compose version: {{ docker_compose_version_output.stdout }}"
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+    - name: Reconnect to server session
+      meta: reset_connection
+
+- name: Install AWS CLI on EC2 Instances
+  hosts: servers
+  gather_facts: False
+  become: yes
+  tasks:
+    - name: Ensure curl is installed
+      package:
+        name: curl
+        state: present
+
+    - name: Ensure unzip is installed
+      package:
+        name: unzip
+        state: present
+
+    - name: Check if AWS CLI is installed
+      command: "aws --version"
+      register: aws_cli_check
+      ignore_errors: true
+
+    - name: Download AWS CLI installation script using curl
+      command: curl -o /tmp/awscliv2.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+      when: aws_cli_check.failed
+
+    - name: Unzip AWS CLI installation package
+      unarchive:
+        src: "/tmp/awscliv2.zip"
+        dest: "/tmp/"
+        remote_src: yes
+      when: aws_cli_check.failed
+
+    - name: Run AWS CLI installer
+      command: "/tmp/aws/install -i /usr/local/aws-cli -b /usr/local/bin --update"
+      when: aws_cli_check.failed
+    - name: Verify AWS CLI installation
+      command: "aws --version"
+      register: aws_cli_version
+    - debug:
+        msg: "AWS CLI version: {{ aws_cli_version.stdout }}"
+- name: Pull Docker image for the frontend from ECR to EC2 instance
+  hosts: servers
+  gather_facts: False
+  become: yes
+  vars_files:
+  - ansible-vars.yaml
+  tasks:
+    - name: Log in to Amazon ECR  
+      docker_login:
+        registry_url: "{{ ecr_url }}"
+        username: AWS
+        password: "{{ lookup('pipe', 'aws ecr get-login-password --region ' + region) }}"
+        reauthorize: yes
+    - name: Pull frontend Docker image from ECR
+      docker_image:
+        name: "{{ ecr_url }}/{{ ecr_repository }}"
+        tag: "{{ frontend_image_tag }}"
+        source: pull
+    - name: Pull backend Docker image from ECR
+      docker_image:
+        name: "{{ ecr_url }}/{{ ecr_repository }}"
+        tag: "{{ backend_image_tag }}"
+        source: pull
+    - name: Display Docker images on the host
+      command: docker images
+      register: docker_images_output
+    - name: Show Docker images
+      debug:
+        msg: "{{ docker_images_output.stdout }}"
+- name: Start Docker containers
+  hosts: servers
+  gather_facts: False
+  become: yes
+  vars_files:
+  - ansible-vars.yaml
+  tasks:
+  - name: Create Docker Network
+    docker_network:
+      name: "{{ docker_network_name }}"
+      state: present
+  - name: Copy Docker Compose file to the EC2 instance
+    copy:
+      src: "{{ compose_local_path }}"
+      dest: "{{ compose_remote_path }}"
+  - name: Start Docker containers from Docker Compose
+    shell: |
+      docker-compose up -d
+    args:
+      chdir: "{{ project_src_path }}"
+  - name: Run makemigrations inside backend container
+    command: docker exec {{ backend_container_name }} python manage.py makemigrations
+  - name: Run migrate inside backend container
+    command: docker exec {{ backend_container_name }} python manage.py migrate
+  - name: Create superuser inside backend container
+    command: >
+      docker exec {{ backend_container_name }} python manage.py shell -c
+      "from django.contrib.auth import get_user_model;
+      User = get_user_model();
+      User.objects.filter(username='{{ superuser_username }}').exists() or
+      User.objects.create_superuser('{{ superuser_username }}', '{{ superuser_email }}', '{{ superuser_password
+      }}')"
